@@ -3,9 +3,9 @@
  * Listens for order status changes and fires the matching SMS.
  *
  * This is the integration contract with the payment side: the BML Connect
- * gateway moves an order to "Processing" on payment, and shop staff move it to
- * "Ready for pickup". This class reacts to those transitions and nothing else —
- * it never touches payment logic.
+ * gateway moves an order to "Processing" on payment, shop staff move it to
+ * "Ready for pickup", and to "Completed" at handover. This class reacts to those
+ * transitions and nothing else — it never touches payment logic.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -21,6 +21,7 @@ class CCN_Notifier {
 		return array(
 			'processing'                 => array( 'notify_processing', 'msg_processing' ),
 			CCN_Status::STATUS /* ready-for-pickup */ => array( 'notify_ready_for_pickup', 'msg_ready_for_pickup' ),
+			'completed'                  => array( 'notify_completed', 'msg_completed' ),
 		);
 	}
 
@@ -65,7 +66,10 @@ class CCN_Notifier {
 
 		$phone   = $order->get_billing_phone();
 		$message = self::render( CCN_Settings::get( $msg_key ), $order );
-		$result  = CCN_SMS_Client::send( $phone, $message );
+		$result  = CCN_SMS_Client::send( $phone, $message, array(
+			'order_id' => $order_id,
+			'trigger'  => $to,
+		) );
 
 		if ( is_wp_error( $result ) ) {
 			self::log( "order {$order_id}: '{$to}' SMS failed: " . $result->get_error_message(), 'error' );
@@ -91,17 +95,57 @@ class CCN_Notifier {
 
 	/**
 	 * Replace {placeholders} in a template with order data.
+	 *
+	 * Everything is forced through plain_text(): an SMS is not HTML, and several
+	 * of these sources are. The site name arrives entity-encoded straight from
+	 * the option, and stripping tags alone leaves the entities intact.
 	 */
 	private static function render( $template, WC_Order $order ) {
 		$shop = CCN_Settings::get( 'shop_name' );
 		$repl = array(
 			'{customer_name}' => $order->get_billing_first_name(),
 			'{order_number}'  => $order->get_order_number(),
-			'{order_total}'   => wp_strip_all_tags( $order->get_formatted_order_total() ),
+			'{order_total}'   => self::total( $order ),
 			'{site_name}'     => get_bloginfo( 'name' ),
 			'{shop_name}'     => '' !== $shop ? $shop : get_bloginfo( 'name' ),
 		);
-		return strtr( (string) $template, $repl );
+
+		foreach ( $repl as $token => $value ) {
+			$repl[ $token ] = self::plain_text( $value );
+		}
+
+		return self::plain_text( strtr( (string) $template, $repl ) );
+	}
+
+	/**
+	 * The order total as text.
+	 *
+	 * Deliberately not wc_price()/get_formatted_order_total(): those return
+	 * markup, and their symbol for MVR is the Thaana abbreviation ".ރ", which
+	 * would drag the whole message out of the GSM 7-bit alphabet into UCS-2 and
+	 * cut the per-segment limit from 160 characters to 70. The ISO code is
+	 * unambiguous, plain ASCII, and works for whatever currency a shop uses.
+	 */
+	private static function total( WC_Order $order ) {
+		return $order->get_currency() . ' ' . number_format(
+			(float) $order->get_total(),
+			wc_get_price_decimals(),
+			wc_get_price_decimal_separator(),
+			wc_get_price_thousand_separator()
+		);
+	}
+
+	/**
+	 * Reduce a possibly-HTML string to something a handset can render.
+	 *
+	 * wp_strip_all_tags() removes the tags but leaves entities untouched, which
+	 * is how "&nbsp;.&#x783;" reached customers verbatim. Decoding also yields a
+	 * non-breaking space, swapped for an ordinary one so it cannot show up as a
+	 * missing-glyph box.
+	 */
+	private static function plain_text( $value ) {
+		$value = html_entity_decode( wp_strip_all_tags( (string) $value ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		return trim( str_replace( "\xc2\xa0", ' ', $value ) );
 	}
 
 	private static function log( $message, $level = 'info' ) {

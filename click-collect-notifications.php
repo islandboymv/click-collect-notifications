@@ -2,27 +2,24 @@
 /**
  * Plugin Name: Click & Collect Notifications for WooCommerce
  * Plugin URI:  https://github.com/islandboymv/click-collect-notifications
- * Description: Adds a "Ready for pickup" order status and sends the customer an SMS when their order is paid
- *              and again when it's ready to collect in store. The SMS provider is pluggable — drop in the
- *              provider's API in one place (includes/class-ccn-sms-client.php). Self-updates from GitHub Releases.
+ * Description: Adds a "Ready for pickup" order status and sends the customer an SMS (via MsgOwl) when their
+ *              order is paid and again when it's ready to collect in store. Shows the MsgOwl balance to admins
+ *              and keeps an audit log of every SMS. Self-updates from GitHub Releases.
  * Author:      Islandboy
- * Version:     0.1.0
+ * Version:     0.7.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
  * WC tested up to: 10.7
  * Text Domain: click-collect
  * License:     GPL-2.0-or-later
- *
- * NOTE: This is a working skeleton. Order-status + notification plumbing is complete and testable;
- * the actual SMS API call is a clearly-marked stub awaiting the provider's key + docs.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'CCN_VERSION', '0.1.0' );
+define( 'CCN_VERSION', '0.7.0' );
 define( 'CCN_FILE', __FILE__ );
 define( 'CCN_PATH', plugin_dir_path( __FILE__ ) );
 define( 'CCN_URL', plugin_dir_url( __FILE__ ) );
@@ -42,7 +39,7 @@ add_action( 'before_woocommerce_init', function () {
  * GitHub-powered automatic updates.
  *
  * To ship an update: bump the Version header, commit, and publish a GitHub Release
- * (e.g. tag v0.2.0). PUC ignores releases marked "pre-release".
+ * (e.g. tag v0.3.0). PUC ignores releases marked "pre-release".
  */
 add_action( 'plugins_loaded', function () {
 	require_once CCN_PATH . 'lib/plugin-update-checker/plugin-update-checker.php';
@@ -95,9 +92,13 @@ function ccn_send_telemetry() {
 
 register_activation_hook( __FILE__, function () {
 	wp_schedule_single_event( time() + 30, 'ccn_telemetry_ping' );
+	// Create the SMS audit-log table up front.
+	require_once CCN_PATH . 'includes/class-ccn-log.php';
+	CCN_Log::install();
 } );
 register_deactivation_hook( __FILE__, function () {
 	wp_clear_scheduled_hook( 'ccn_telemetry_ping' );
+	wp_clear_scheduled_hook( 'ccn_log_cleanup' );
 } );
 
 /**
@@ -114,13 +115,19 @@ add_action( 'plugins_loaded', function () {
 	}
 
 	require_once CCN_PATH . 'includes/class-ccn-settings.php';
+	require_once CCN_PATH . 'includes/class-ccn-log.php';
+	require_once CCN_PATH . 'includes/class-ccn-sms-text.php';
 	require_once CCN_PATH . 'includes/class-ccn-sms-client.php';
 	require_once CCN_PATH . 'includes/class-ccn-status.php';
 	require_once CCN_PATH . 'includes/class-ccn-notifier.php';
+	require_once CCN_PATH . 'includes/class-ccn-email.php';
 
+	CCN_Log::maybe_install(); // create/upgrade the audit-log table if needed.
 	CCN_Status::init();
 	CCN_Settings::init();
+	CCN_Log::init();
 	CCN_Notifier::init();
+	CCN_Email::init();
 }, 11 );
 
 /**
